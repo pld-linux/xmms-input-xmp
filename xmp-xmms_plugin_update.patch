@@ -1,0 +1,304 @@
+--- xmp-3.5.0/src/plugin/xmms.c.orig	2017-05-22 16:20:23.876653755 +0200
++++ xmp-3.5.0/src/plugin/xmms.c	2017-05-22 21:14:44.933118768 +0200
+@@ -20,9 +20,7 @@
+ 
+ #include <gtk/gtk.h>
+ 
+-#include "xmp.h"
+-#include "common.h"
+-#include "driver.h"
++#include <xmp.h>
+ 
+ static void	init		(void);
+ static int	is_our_file	(char *);
+@@ -103,7 +101,6 @@
+ 	.get_song_info	= get_song_info,
+ };
+ 
+-extern struct xmp_drv_info drv_smix;
+ 
+ 
+ static void aboutbox()
+@@ -113,8 +110,8 @@
+ 	GtkWidget *about_exit;
+ 	GtkWidget *scroll1;
+ 	GtkWidget *table1;
+-	GtkWidget *label_fmt, *label_trk;
+-	struct xmp_fmt_info *f, *fmt;
++	GtkWidget *label_fmt;
++	char **fmt;
+ 	int i;
+ 
+ 	if (about_window) {
+@@ -160,20 +157,16 @@
+ 	gtk_widget_set (scroll1, "height", 100, NULL);
+ 	gtk_box_pack_start(GTK_BOX(vbox1), scroll1, TRUE, TRUE, 0);
+ 
+-	xmp_get_fmt_info(&fmt);
+-	table1 = gtk_table_new(100, 2, FALSE);
+-	for (i = 0, f = fmt; f; i++, f = f->next) {
+-		label_fmt = gtk_label_new(f->id);
+-		label_trk = gtk_label_new(f->tracker);
++	fmt = xmp_get_format_list();
++	table1 = gtk_table_new(100, 1, FALSE);
++	for (i = 0; fmt[i] != NULL; i++) {
++		label_fmt = gtk_label_new(fmt[i]);
+ 		gtk_label_set_justify (GTK_LABEL (label_fmt), GTK_JUSTIFY_LEFT);
+-		gtk_label_set_justify (GTK_LABEL (label_trk), GTK_JUSTIFY_LEFT);
+ 		gtk_table_attach_defaults (GTK_TABLE (table1),
+ 						label_fmt, 0, 1, i, i + 1);
+-		gtk_table_attach_defaults (GTK_TABLE (table1),
+-						label_trk, 1, 2, i, i + 1);
+ 	}
+ 
+-	gtk_table_resize (GTK_TABLE (table1), i + 1, 3);
++	gtk_table_resize (GTK_TABLE (table1), i + 1, 2);
+ 	gtk_object_set_data(GTK_OBJECT(table1), "table1", table1);
+ 	
+ 	gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(scroll1),
+@@ -197,7 +190,6 @@
+ 	if (!playing)
+ 		return;
+ 
+-	_D("*** stop!");
+ 	xmp_stop_module(ctx); 
+ 
+ 	pthread_join(decode_thread, NULL);
+@@ -210,26 +202,8 @@
+ 
+ static void seek(int time)
+ {
+-	int i, t;
+-	struct xmp_player_context *p = &((struct xmp_context *)ctx)->p;
+-
+-	_D("seek to %d, total %d", time, xmp_cfg.time);
+-
+ 	time *= 1000;
+-	for (i = 0; i < xmp_cfg.mod_info.len; i++) {
+-		t = p->m.xxo_info[i].time;
+-
+-		_D("%2d: %d %d", i, time, t);
+-
+-		if (t > time) {
+-			int a;
+-			if (i > 0)
+-				i--;
+-			a = xmp_ord_set(ctx, i);
+-			xmp_ip.output->flush(p->m.xxo_info[i].time);
+-			break;
+-		}
+-	}
++	xmp_seek_time(ctx, time);
+ }
+ 
+ static void mod_pause(short p)
+@@ -260,7 +234,6 @@
+ 	ConfigFile *cfg;
+ 	gchar *filename;
+ 
+-	xmp_drv_register(&drv_smix);
+ 	ctx = xmp_create_context();
+ 
+ 	xmp_cfg.mixing_freq = 0;
+@@ -291,13 +264,12 @@
+ 		xmms_cfg_free(cfg);
+ 	}
+ 
+-	xmp_init(ctx, 0, NULL);
+ }
+ 
+ 
+ static int is_our_file(char *filename)
+ {
+-	if (xmp_test_module(ctx, filename, NULL) == 0)
++	if (xmp_test_module(filename, NULL) == 0)
+ 		return 1;
+ 
+ 	return 0;
+@@ -309,13 +281,11 @@
+ 	xmp_context ctx2;
+ 	int lret;
+ 	struct xmp_module_info mi;
+-	struct xmp_options *opt;
+ 
+ 	/* Create new context to load a file and get the length */
+ 
+ 	ctx2 = xmp_create_context();
+-	opt = xmp_get_options(ctx2);
+-	opt->skipsmp = 1;	/* don't load samples */
++	xmp_set_player(ctx2, XMP_PLAYER_SMPCTL, XMP_SMPCTL_SKIP); /* don't load samples */
+ 
+ 	pthread_mutex_lock(&load_mutex);
+ 	lret = xmp_load_module(ctx2, filename);
+@@ -328,7 +298,7 @@
+ 
+ 	*length = lret;
+ 	xmp_get_module_info(ctx2, &mi);
+-	*title = g_strdup(mi.name);
++	*title = g_strdup(mi.mod->name);
+ 
+ 	xmp_release_module(ctx2);
+ 	xmp_free_context(ctx2);
+@@ -339,15 +309,12 @@
+ {
+ 	int channelcnt = 1;
+ 	FILE *f;
+-	struct xmp_options *opt;
+ 	int lret;
+ 	AFormat fmt;
+ 	int nch;
++	int xmpformat = 0;
++	int freq;
+ 	
+-	opt = xmp_get_options(ctx);
+-
+-	_D("play_file: %s", filename);
+-
+ 	stop();		/* sanity check */
+ 
+ 	if ((f = fopen(filename,"rb")) == 0) {
+@@ -359,60 +326,46 @@
+ 	xmp_plugin_audio_error = FALSE;
+ 	playing = 1;
+ 
+-	opt->resol = 8;
+-	opt->verbosity = 0;
+-	opt->drv_id = "smix";
+-
+ 	switch (xmp_cfg.mixing_freq) {
+ 	case 1:
+-		opt->freq = 22050;	/* 1:2 mixing freq */
++		freq = 22050;	/* 1:2 mixing freq */
+ 		break;
+ 	case 2:
+-		opt->freq = 11025;	/* 1:4 mixing freq */
++		freq = 11025;	/* 1:4 mixing freq */
+ 		break;
+ 	default:
+-		opt->freq = 44100;	/* standard mixing freq */
++		freq = 44100;	/* standard mixing freq */
+ 		break;
+ 	}
+ 
+-	if (xmp_cfg.force8bit == 0)
+-		opt->resol = 16;
++	if (xmp_cfg.force8bit)
++		xmpformat |= XMP_FORMAT_8BIT;
+ 
+ 	if (xmp_cfg.force_mono == 0) {
+ 		channelcnt = 2;
+-		opt->outfmt &= ~XMP_FMT_MONO;
+ 	} else {
+-		opt->outfmt |= XMP_FMT_MONO;
++		xmpformat |= XMP_FORMAT_MONO;
+ 	}
+ 
+-	if (xmp_cfg.interpolation == 1)
+-		opt->flags |= XMP_CTL_ITPT;
+-	else
+-		opt->flags &= ~XMP_CTL_ITPT;
+-
+-	if (xmp_cfg.filter == 1)
+-		opt->flags |= XMP_CTL_FILTER;
+-	else
+-		opt->flags &= ~XMP_CTL_FILTER;
+-
+-	opt->mix = xmp_cfg.pan_amplitude;
++	xmp_set_player(ctx, XMP_PLAYER_INTERP, xmp_cfg.interpolation ? XMP_INTERP_LINEAR : XMP_INTERP_NEAREST);
++	xmp_set_player(ctx, XMP_PLAYER_DSP, xmp_cfg.filter ? XMP_DSP_LOWPASS : 0);
++	xmp_set_player(ctx, XMP_PLAYER_MIX, xmp_cfg.pan_amplitude);
+ 
+-	fmt = opt->resol == 16 ? FMT_S16_NE : FMT_U8;
+-	nch = opt->outfmt & XMP_FMT_MONO ? 1 : 2;
++	fmt = (!xmp_cfg.force8bit) ? FMT_S16_NE : FMT_U8;
++	nch = xmp_cfg.force_mono ? 1 : 2;
+ 	
+ 	if (audio_open)
+ 	    xmp_ip.output->close_audio();
+ 	
+-	if (!xmp_ip.output->open_audio(fmt, opt->freq, nch)) {
++	if (!xmp_ip.output->open_audio(fmt, freq, nch)) {
+ 	    xmp_plugin_audio_error = TRUE;
+ 	    return;
+ 	}
+ 	
+ 	audio_open = TRUE;
+ 
+-	xmp_open_audio(ctx);
++	xmp_start_player(ctx, freq, xmpformat);
+ 
+-	_D("*** loading: %s", filename);
+ 	pthread_mutex_lock(&load_mutex);
+ 	lret =  xmp_load_module(ctx, filename);
+ 	pthread_mutex_unlock(&load_mutex);
+@@ -423,14 +376,10 @@
+ 		return;
+ 	}
+ 
+-	_D ("before panel update");
+-
+ 	xmp_cfg.time = lret;
+ 	xmp_get_module_info(ctx, &xmp_cfg.mod_info);
+ 
+-	_D("after panel update");
+-
+-	xmp_ip.set_info(xmp_cfg.mod_info.name, lret, 0, opt->freq, channelcnt);
++	xmp_ip.set_info(xmp_cfg.mod_info.mod->name, lret, 0, freq, channelcnt);
+ 	pthread_create(&decode_thread, NULL, play_loop, NULL);
+ }
+ 
+@@ -439,28 +388,26 @@
+ {
+ 	void *data;
+ 	int size;
++	struct xmp_frame_info fi;
+ 
+-	xmp_player_start(ctx);
+-	while (xmp_player_frame(ctx) == 0) {
+-                xmp_get_buffer(ctx, &data, &size);
++	while (xmp_play_frame(ctx) == 0) {
++		xmp_get_frame_info(ctx, &fi);
+ 
+ 		xmp_ip.add_vis_pcm(xmp_ip.output->written_time(),
+ 			xmp_cfg.force8bit ? FMT_U8 : FMT_S16_NE,
+-			xmp_cfg.force_mono ? 1 : 2, size, data);
++			xmp_cfg.force_mono ? 1 : 2, fi.buffer_size, fi.buffer);
+ 	
+-		while (xmp_ip.output->buffer_free() < size && playing)
++		while (xmp_ip.output->buffer_free() < fi.buffer_size && playing)
+ 			usleep(10000);
+ 
+ 		if (playing)
+-			xmp_ip.output->write_audio(data, size);
++			xmp_ip.output->write_audio(fi.buffer, fi.buffer_size);
+ 	}
+-        xmp_player_end(ctx);
++        xmp_end_player(ctx);
+ 
+ 	xmp_release_module(ctx);
+-	xmp_close_audio(ctx);
+ 	playing = 0;
+ 
+-	_D("--- pthread_exit");
+ 	pthread_exit(NULL);
+ 
+ 	return NULL;
+@@ -695,9 +642,6 @@
+ {
+ 	ConfigFile *cfg;
+ 	gchar *filename;
+-	struct xmp_options *opt;
+-
+-	opt = xmp_get_options(ctx);
+ 
+ 	if (GTK_TOGGLE_BUTTON(Res_16)->active)
+ 		xmp_cfg.force8bit = 0;
+@@ -723,7 +667,7 @@
+ 	xmp_cfg.fixloops = !!GTK_TOGGLE_BUTTON(Fixloops_Check)->active;
+ 
+ 	xmp_cfg.pan_amplitude = (guchar)GTK_ADJUSTMENT(pansep_adj)->value;
+-        opt->mix = xmp_cfg.pan_amplitude;
++        xmp_set_player(ctx, XMP_PLAYER_MIX, xmp_cfg.pan_amplitude);
+ 
+ 	filename = g_strconcat(g_get_home_dir(), CONFIG_FILE, NULL);
+ 	cfg = xmms_cfg_open_file(filename);
